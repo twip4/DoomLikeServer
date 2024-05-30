@@ -6,10 +6,13 @@
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
+#include <map>
 #include <nlohmann/json.hpp>
 #include "constante.h"
 
 #define PORT 8080
+
+void shot(std::map<int, Player>* clientPlayers,int x, int y, int angle, int id);
 
 using json = nlohmann::json;
 
@@ -23,14 +26,13 @@ int main() {
     std::vector<int> client_sockets;
     std::map<int, Player> clientPlayers;
 
-
-    // Créer le socket file descriptor
+    // Create socket file descriptor
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    // Attacher le socket au port 8080
+    // Attach socket to port 8080
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         perror("setsockopt");
         exit(EXIT_FAILURE);
@@ -49,14 +51,14 @@ int main() {
     }
     std::cout << "Server is listening on port " << PORT << std::endl;
 
-    // Boucle principale
+    // Main loop
     while (true) {
-        // Réinitialiser le set de descripteurs de fichier
+        // Clear the socket set
         FD_ZERO(&readfds);
         FD_SET(server_fd, &readfds);
         int max_sd = server_fd;
 
-        // Ajouter les sockets clients au set de descripteurs de fichier
+        // Add client sockets to set
         for (int client_socket : client_sockets) {
             FD_SET(client_socket, &readfds);
             if (client_socket > max_sd) {
@@ -64,53 +66,78 @@ int main() {
             }
         }
 
-        // Si quelque chose se passe sur le socket maître, c'est une nouvelle connexion
+        // Wait for an activity on one of the sockets
+        int activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
+
+        if ((activity < 0) && (errno != EINTR)) {
+            perror("select error");
+        }
+
+        // If something happened on the master socket, it's an incoming connection
         if (FD_ISSET(server_fd, &readfds)) {
             if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
                 perror("accept");
                 exit(EXIT_FAILURE);
             }
-            for (int client_socket : client_sockets)
             std::cout << "New connection, socket fd is " << new_socket << std::endl;
-            for (int client_socket : client_sockets){
-                json shotData;
-                shotData["data"] = "AddPlayer";
-                shotData["id"] = client_socket;
-                shotData["position"]["x"] = clientPlayers[client_socket].posX;
-                shotData["position"]["y"] = clientPlayers[client_socket].posY;
 
-                std::string shotStr = shotData.dump();
+            // Add new socket to client_sockets vector
+            client_sockets.push_back(new_socket);
 
-                if (send(client_socket, shotStr.c_str(), shotStr.length(), 0) < 0) {
-                    perror("send");
+            // Notify existing clients of the new connection
+            for (int client_socket : client_sockets) {
+                if (client_socket != new_socket) {
+                    json shotData;
+                    shotData["data"] = "AddPlayer";
+                    shotData["id"] = client_socket;
+                    shotData["position"]["x"] = clientPlayers[client_socket].posX;
+                    shotData["position"]["y"] = clientPlayers[client_socket].posY;
+
+                    std::string shotStr = shotData.dump();
+
+                    if (send(new_socket, shotStr.c_str(), shotStr.length(), 0) < 0) {
+                        perror("send");
+                    }
                 }
             }
-            client_sockets.push_back(new_socket);
         }
 
-        // Lire les messages des clients et les retransmettre à tous les autres clients
+        // Read messages from clients and broadcast them
         for (int client_socket : client_sockets) {
             if (FD_ISSET(client_socket, &readfds)) {
                 int valread = read(client_socket, buffer, 1024);
                 if (valread == 0) {
-                    // Le client a fermé la connexion
+                    // Client disconnected
                     std::cout << "Client disconnected, socket fd is " << client_socket << std::endl;
                     close(client_socket);
                     client_sockets.erase(std::remove(client_sockets.begin(), client_sockets.end(), client_socket), client_sockets.end());
+
+                    for (int client_sock : client_sockets) {
+                            json shotData;
+                            shotData["data"] = "RemovePlayer";
+                            shotData["id"] = client_socket;
+
+                            std::string shotStr = shotData.dump();
+
+                            if (send(client_sock, shotStr.c_str(), shotStr.length(), 0) < 0) {
+                                perror("send");
+                            }
+                    }
                 } else {
                     buffer[valread] = '\0';
                     std::cout << "Received message: " << buffer << " from socket fd: " << client_socket << std::endl;
                     std::string jsonStr(buffer, valread);
 
                     try {
-                        // Désérialiser la chaîne en objet JSON
+                        // Deserialize the string into JSON object
                         json receivedData = json::parse(jsonStr);
-                        if (receivedData["data"] == "init"){
+
+                        if (receivedData["data"] == "init") {
                             clientPlayers[client_socket].posX = receivedData["position"]["x"];
                             clientPlayers[client_socket].posY = receivedData["position"]["y"];
                             clientPlayers[client_socket].pv = receivedData["pv"];
 
-                            for (int other_socket : client_sockets) {
+                            for (int other_socket: client_sockets) {
                                 if (other_socket != client_socket) {
                                     json shotData;
                                     shotData["data"] = "AddPlayer";
@@ -125,15 +152,11 @@ int main() {
                                     }
                                 }
                             }
-
-                        } else {
-                            std::cerr << "Received JSON does not contain 'init'" << std::endl;
-                        }
-                        if (receivedData["data"] == "move"){
+                        } else if (receivedData["data"] == "move") {
                             clientPlayers[client_socket].posX = receivedData["position"]["x"];
                             clientPlayers[client_socket].posY = receivedData["position"]["y"];
 
-                            for (int other_socket : client_sockets) {
+                            for (int other_socket: client_sockets) {
                                 if (other_socket != client_socket) {
                                     json shotData;
                                     shotData["data"] = "MovePlayer";
@@ -148,18 +171,47 @@ int main() {
                                     }
                                 }
                             }
-                        } else {
-                            std::cerr << "Received JSON does not contain 'init'" << std::endl;
+                        } else if (receivedData["data"] == "shot") {
+                            shot(&clientPlayers, receivedData["position"]["x"], receivedData["position"]["y"],receivedData["angle"],client_socket);
                         }
 
-                    } catch (json::parse_error& e) {
+                        else {
+                                std::cerr << "Received JSON does not contain 'init' or 'move' or 'shot'" << std::endl;
+                            }
+                        }
+                    catch (json::parse_error& e) {
                         std::cerr << "JSON parse error: " << e.what() << std::endl;
                     }
                 }
             }
         }
     }
-
     close(server_fd);
     return 0;
+}
+
+void shot(std::map<int, Player>* clientPlayers,int posX, int posY, int angle, int id){
+    const float tolerance = 5;
+    for (auto& pair : *clientPlayers) {
+        if (id != pair.first) {
+            float distanceMonster = sqrt(pow(pair.second.posX - posX, 2) + pow(pair.second.posY - posY, 2));
+            float x = posX + static_cast<int>(cos(angle * M_PI / 180) * distanceMonster);
+            float y = posY + static_cast<int>(sin(angle * M_PI / 180) * distanceMonster);
+
+            float distanceShot = sqrt(pow(x - pair.second.posX, 2) + pow(y - pair.second.posY, 2));
+
+            if (distanceShot <= tolerance) {
+                json shotData;
+                shotData["data"] = "ShotPlayer";
+                pair.second.pv += -20;
+                shotData["pv"] = pair.second.pv;
+
+                std::string shotStr = shotData.dump();
+
+                if (send(pair.first, shotStr.c_str(), shotStr.length(), 0) < 0) {
+                    perror("send");
+                }
+            }
+        }
+    }
 }
