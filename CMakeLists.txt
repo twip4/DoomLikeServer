@@ -3,4 +3,10 @@ project(untitled)
 
 set(CMAKE_CXX_STANDARD 17)
 
-add_executable(untitled main.cpp)
+include_directories(/opt/homebrew/include/)
+
+link_directories(/opt/homebrew/lib)
+
+add_executable(untitled main.cpp
+        constante.h
+)
