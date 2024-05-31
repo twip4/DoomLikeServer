@@ -7,6 +7,6 @@ include_directories(/opt/homebrew/include/)
 
 link_directories(/opt/homebrew/lib)
 
-add_executable(untitled main.cpp
+add_executable(DoomLikeServer main.cpp
         constante.h
 )
